@@ -1,0 +1,16 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+dist/
+build/
+*.egg-info/
+.DS_Store
+.env
+.env.*
+!.env.example
+config.local.*
+*.local.json
+*.log
+logs/
+secrets/

@@ -6,7 +6,7 @@
 # name = "Orca FlashForge Plugin"
 # description = "Prototype printer manager for FlashForge Adventurer 5M."
 # author = "Community contributors"
-# version = "0.5.0"
+# version = "0.5.1"
 # ///
 """Opt-in LAN discovery and locally saved printer profiles. No printer commands or pairing secrets."""
 
@@ -46,7 +46,7 @@ button:disabled { opacity: .5; cursor: default; }
 small { opacity: .7; } #status { min-height: 1.4em; }
 </style></head><body>
 <h1>FlashForge Printers</h1>
-<p class="muted">v0.5.0 · Read-only live status preview · No control commands</p>
+<p class="muted">v0.5.1 · Read-only live status preview · No control commands</p>
 <section class="panel"><h2>Saved printers</h2><div id="printers">No printers added yet.</div></section>
 <section class="panel" id="statuspanel"><h2>Live printer status</h2>
 <p class="muted">Select a saved printer and enter its check code for a one-time, read-only status request. The code is not saved.</p>
@@ -212,6 +212,8 @@ class PrinterManager(orca.script.ScriptPluginCapabilityBase):
         self.scanning = False
         self.probing = False
         self.udp_testing = False
+        self.reading_status = False
+        self.discovered_serials = {}
 
     @staticmethod
     def get_config_path():

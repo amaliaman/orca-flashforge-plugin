@@ -6,7 +6,7 @@
 # name = "Orca FlashForge Plugin"
 # description = "Prototype printer manager for FlashForge Adventurer 5M."
 # author = "Community contributors"
-# version = "0.3.1"
+# version = "0.3.2"
 # ///
 """Opt-in LAN UDP discovery. No printer commands or persistent secrets.
 
@@ -40,7 +40,7 @@ button:disabled { opacity: .5; cursor: default; }
 small { opacity: .7; } #status { min-height: 1.4em; }
 </style></head><body>
 <h1>FlashForge Printers</h1>
-<p class="muted">v0.3.1 · LAN discovery prototype · No printer commands</p>
+<p class="muted">v0.3.2 · LAN discovery prototype · No printer commands</p>
 <section class="panel"><h2>Configured printers (temporary)</h2><div id="printers">No printers added yet.</div></section>
 <section class="panel"><h2>Find printers on your network</h2>
 <p class="muted">Search only when you click the button. Your printer and Mac must be on the same LAN.</p>
@@ -70,10 +70,15 @@ $('scan').addEventListener('click', () => {
   $('discovered').replaceChildren();
   send({command:'discover'});
 });
-function showDiscovered(printers, error) {
+function showDiscovered(printers, error, diagnostics) {
   $('scan').disabled = false;
   const root = $('discovered'); root.replaceChildren();
-  $('scanstatus').textContent = error || (printers.length ? 'Select a printer to fill the form below.' : 'No supported Adventurer 5M found. You can add it manually.');
+  $('scanstatus').textContent = error || (printers.length ? 'Select a printer to fill the form below.' : 'No supported Adventurer 5M found. See diagnostic details below, or add manually.');
+  if (diagnostics) {
+    const detail = document.createElement('p'); detail.className = 'muted';
+    detail.textContent = diagnostics;
+    root.append(detail);
+  }
   printers.forEach(p => {
     const row = document.createElement('div'); row.className = 'entry';
     const info = document.createElement('div');
@@ -109,7 +114,7 @@ if (window.orca && window.orca.onMessage) {
   window.orca.onMessage(msg => {
     if (msg.command === 'printers') { render(msg.printers || []); $('status').textContent = msg.message || ''; }
     if (msg.command === 'error') $('status').textContent = msg.message || 'Invalid input';
-    if (msg.command === 'discovered') showDiscovered(msg.printers || [], msg.error || '');
+    if (msg.command === 'discovered') showDiscovered(msg.printers || [], msg.error || '', msg.diagnostics || '');
   });
 }
 send({command:'list'});
@@ -155,10 +160,14 @@ class PrinterManager(orca.script.ScriptPluginCapabilityBase):
 
     def discover_worker(self):
         try:
-            options = DiscoveryOptions(timeout=5000, idle_timeout=2000, max_retries=1)
+            options = DiscoveryOptions(timeout=8000, idle_timeout=8000, max_retries=1)
             results = asyncio.run(PrinterDiscovery().discover(options))
             matches = []
             seen = set()
+            model_counts = {}
+            for printer in results:
+                model = str(printer.model.value)
+                model_counts[model] = model_counts.get(model, 0) + 1
             for printer in results:
                 if printer.model != PrinterModel.ADVENTURER_5M:
                     continue
@@ -171,12 +180,12 @@ class PrinterManager(orca.script.ScriptPluginCapabilityBase):
                 seen.add(address)
                 matches.append({"name": str(printer.name or "Adventurer 5M")[:60], "address": address})
             if self.win is not None and self.win.is_open():
-                self.win.post({"command": "discovered", "printers": matches})
+                self.win.post({"command": "discovered", "printers": matches, "diagnostics": ("UDP discovery responses: " + str(len(results)) + ". Models: " + (", ".join(str(k) + " (" + str(v) + ")" for k, v in sorted(model_counts.items())) if model_counts else "none") + ".")})
         except Exception as exc:
             # Avoid printing network identifiers or exception details in the UI.
             if self.win is not None and self.win.is_open():
                 self.win.post({"command": "discovered", "printers": [],
-                               "error": "Discovery failed. Check local-network permissions or use manual IP entry."})
+                               "error": "Discovery failed. Check local-network permissions or use manual IP entry.", "diagnostics": "Error type: " + type(exc).__name__})
         finally:
             self.scanning = False
 

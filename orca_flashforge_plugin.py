@@ -1,12 +1,12 @@
 # /// script
 # requires-python = ">=3.12"
-# dependencies = ["flashforge-python-api>=1.6,<2"]
+# dependencies = ["flashforge-python-api>=1.6"]
 #
 # [tool.orcaslicer.plugin]
 # name = "Orca FlashForge Plugin"
 # description = "Prototype printer manager for FlashForge Adventurer 5M."
 # author = "Community contributors"
-# version = "0.3.0"
+# version = "0.3.1"
 # ///
 """Opt-in LAN UDP discovery. No printer commands or persistent secrets.
 
@@ -40,7 +40,7 @@ button:disabled { opacity: .5; cursor: default; }
 small { opacity: .7; } #status { min-height: 1.4em; }
 </style></head><body>
 <h1>FlashForge Printers</h1>
-<p class="muted">v0.3.0 · LAN discovery prototype · No printer commands</p>
+<p class="muted">v0.3.1 · LAN discovery prototype · No printer commands</p>
 <section class="panel"><h2>Configured printers (temporary)</h2><div id="printers">No printers added yet.</div></section>
 <section class="panel"><h2>Find printers on your network</h2>
 <p class="muted">Search only when you click the button. Your printer and Mac must be on the same LAN.</p>

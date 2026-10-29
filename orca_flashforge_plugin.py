@@ -6,12 +6,9 @@
 # name = "Orca FlashForge Plugin"
 # description = "Prototype printer manager for FlashForge Adventurer 5M."
 # author = "Community contributors"
-# version = "0.3.6"
+# version = "0.4.0"
 # ///
-"""Opt-in LAN UDP discovery. No printer commands or persistent secrets.
-
-Printer entries exist only in memory and disappear when OrcaSlicer restarts.
-"""
+"""Opt-in LAN discovery and locally saved printer profiles. No printer commands or pairing secrets."""
 
 import ipaddress
 import uuid
@@ -19,6 +16,11 @@ import asyncio
 import threading
 import socket
 import time
+import json
+import os
+import sys
+import tempfile
+from pathlib import Path
 
 from flashforge.discovery import PrinterDiscovery, DiscoveryOptions, PrinterModel
 import ifaddr
@@ -43,8 +45,8 @@ button:disabled { opacity: .5; cursor: default; }
 small { opacity: .7; } #status { min-height: 1.4em; }
 </style></head><body>
 <h1>FlashForge Printers</h1>
-<p class="muted">v0.3.6 · LAN discovery prototype · No printer commands</p>
-<section class="panel"><h2>Configured printers (temporary)</h2><div id="printers">No printers added yet.</div></section>
+<p class="muted">v0.4.0 · LAN discovery prototype · No printer commands</p>
+<section class="panel"><h2>Saved printers</h2><div id="printers">No printers added yet.</div></section>
 <section class="panel"><h2>Find printers on your network</h2>
 <p class="muted">Search only when you click the button. If broadcast fails, a limited scan of your Mac's local subnet runs automatically.</p>
 <button id="scan">Discover printers</button><p id="scanstatus" role="status" aria-live="polite"></p>
@@ -55,9 +57,9 @@ small { opacity: .7; } #status { min-height: 1.4em; }
 <label for="model">Printer model</label><select id="model"><option value="ad5m">FlashForge Adventurer 5M</option></select>
 <label for="name">Display name</label><input id="name" maxlength="60" value="My Adventurer 5M">
 <label for="address">Printer IPv4 address</label><input id="address" placeholder="192.168.x.x" inputmode="decimal">
-<p><button class="primary" id="add">Add printer (temporary)</button></p>
+<p><button class="primary" id="add">Save printer</button></p>
 <p id="status" role="status" aria-live="polite"></p>
-<p class="muted"><small>Entries are kept only in memory. No pairing code is requested or saved. The printer is not contacted.</small></p>
+<p class="muted"><small>Printer names and addresses are stored locally on this Mac. No pairing codes are requested or saved. The printer is not contacted when saving.</small></p>
 </section>
 <script>
 const $ = id => document.getElementById(id);
@@ -106,7 +108,7 @@ function showDiscovered(printers, error, diagnostics) {
       $('name').value = p.name || 'Adventurer 5M';
       $('address').value = p.address;
       $('scanstatus').textContent = 'Selected ' + (p.name || 'Adventurer 5M') + '. Review the details below.';
-      $('status').textContent = 'Printer selected. Click Add printer to add it to the temporary list.';
+      $('status').textContent = 'Printer selected. Click Save printer to store it locally.';
       $('addpanel').scrollIntoView({behavior:'smooth', block:'start'});
       $('address').focus();
     });
@@ -156,10 +158,71 @@ class PrinterManager(orca.script.ScriptPluginCapabilityBase):
     def __init__(self):
         super().__init__()
         self.printers = []
+        self.load_error = None
+        self.config_path = self.get_config_path()
+        self.load_printers()
         self.win = None
         self.scanning = False
         self.probing = False
         self.udp_testing = False
+
+    @staticmethod
+    def get_config_path():
+        """Store non-secret settings in a user-owned application support folder."""
+        if sys.platform == "darwin":
+            base = Path.home() / "Library" / "Application Support"
+        elif os.name == "nt":
+            base = Path(os.environ.get("APPDATA") or (Path.home() / "AppData" / "Roaming"))
+        else:
+            base = Path(os.environ.get("XDG_CONFIG_HOME") or (Path.home() / ".config"))
+        return base / "orca-flashforge-plugin" / "printers.json"
+
+    def load_printers(self):
+        """Reject malformed config rather than silently replacing it."""
+        if not self.config_path.exists():
+            return
+        try:
+            raw = json.loads(self.config_path.read_text(encoding="utf-8"))
+            if not isinstance(raw, dict) or raw.get("schema_version") != 1:
+                raise ValueError("Unsupported printer configuration format.")
+            entries = raw.get("printers")
+            if not isinstance(entries, list) or len(entries) > 100:
+                raise ValueError("Invalid printer list.")
+            validated = []
+            seen = set()
+            for item in entries:
+                if not isinstance(item, dict) or item.get("model") != "ad5m":
+                    raise ValueError("Invalid printer entry.")
+                address = validate_ipv4(item.get("address", ""))
+                name = item.get("name")
+                ident = item.get("id")
+                if not isinstance(name, str) or not 1 <= len(name.strip()) <= 60:
+                    raise ValueError("Invalid printer name.")
+                if not isinstance(ident, str) or len(ident) != 32 or any(c not in "0123456789abcdef" for c in ident):
+                    raise ValueError("Invalid printer identifier.")
+                if address in seen:
+                    raise ValueError("Duplicate printer address.")
+                seen.add(address)
+                validated.append({"id": ident, "model": "ad5m", "name": name.strip(), "address": address})
+            self.printers = validated
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            self.load_error = "Saved printer settings could not be loaded. The existing file was not changed."
+
+    def save_printers(self, entries):
+        """Atomic, user-private config write. No pairing credentials."""
+        parent = self.config_path.parent
+        parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        fd, temporary = tempfile.mkstemp(prefix=".printers-", suffix=".tmp", dir=parent)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                os.chmod(temporary, 0o600)
+                json.dump({"schema_version": 1, "printers": entries}, stream, indent=2)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, self.config_path)
+        finally:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
 
     def get_name(self):
         return "Manage FlashForge Printers"
@@ -177,6 +240,8 @@ class PrinterManager(orca.script.ScriptPluginCapabilityBase):
         return orca.ExecutionResult.success("FlashForge printer manager opened.")
 
     def post_list(self, message=""):
+        if self.load_error:
+            message = self.load_error + (" " + message if message else "")
         if self.win is not None:
             self.win.post({"command": "printers", "printers": self.printers, "message": message})
 
@@ -380,19 +445,35 @@ class PrinterManager(orca.script.ScriptPluginCapabilityBase):
                 address = validate_ipv4(msg.get("address", ""))
                 if any(p["address"] == address for p in self.printers):
                     raise ValueError("This printer address is already in the list.")
-                self.printers.append({
+                if self.load_error:
+                    raise ValueError("Cannot save while the existing configuration cannot be loaded.")
+                updated = self.printers + [{
                     "id": uuid.uuid4().hex,
                     "model": "ad5m",
                     "name": name,
                     "address": address,
-                })
-                self.post_list("Printer added to temporary list.")
-            except ValueError as exc:
-                self.win.post({"command": "error", "message": str(exc)})
+                }]
+                self.save_printers(updated)
+                self.printers = updated
+                self.post_list("Printer saved on this Mac.")
+            except (ValueError, OSError) as exc:
+                message = str(exc) if isinstance(exc, ValueError) else "Could not write local printer settings."
+                self.win.post({"command": "error", "message": message})
         elif command == "remove":
             target = msg.get("id")
-            self.printers = [p for p in self.printers if p["id"] != target]
-            self.post_list("Printer removed from temporary list.")
+            if self.load_error:
+                self.post_list()
+                return
+            updated = [p for p in self.printers if p["id"] != target]
+            if len(updated) == len(self.printers):
+                self.post_list("Printer not found.")
+                return
+            try:
+                self.save_printers(updated)
+                self.printers = updated
+                self.post_list("Saved printer removed.")
+            except OSError:
+                self.post_list("Could not update local printer settings.")
 
 
 @orca.plugin

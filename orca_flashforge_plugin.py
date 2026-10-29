@@ -6,7 +6,7 @@
 # name = "Orca FlashForge Plugin"
 # description = "Prototype printer manager for FlashForge Adventurer 5M."
 # author = "Community contributors"
-# version = "0.6.0"
+# version = "0.7.0"
 # ///
 """Opt-in LAN discovery and locally saved printer profiles. No printer commands or pairing secrets."""
 
@@ -34,7 +34,7 @@ PAGE = """<!doctype html>
 <style>
 body { font: 14px system-ui, sans-serif; margin: 24px; color: var(--orca-text, #e5e7eb); background: var(--orca-bg, #24272c); }
 h1 { font-size: 22px; margin: 0 0 6px; } h2 { font-size: 17px; margin: 0 0 12px; }
-p { line-height: 1.5; } .dash { display:grid; grid-template-columns:repeat(auto-fit,minmax(170px,1fr)); gap:12px; margin-top:16px; } .tile { border:1px solid #6666; border-radius:8px; padding:14px; } .tile .value { font-size:20px; font-weight:650; margin-top:6px; overflow-wrap:anywhere; } progress { width:100%; height:16px; accent-color:#087e74; } .controls { display:flex; gap:10px; flex-wrap:wrap; } .muted { opacity: .72; }
+p { line-height: 1.5; } .camera { display:block; width:100%; max-width:720px; aspect-ratio:4/3; object-fit:contain; background:#121212; border-radius:8px; margin-top:12px; } .camera[hidden] { display:none; } .dash { display:grid; grid-template-columns:repeat(auto-fit,minmax(170px,1fr)); gap:12px; margin-top:16px; } .tile { border:1px solid #6666; border-radius:8px; padding:14px; } .tile .value { font-size:20px; font-weight:650; margin-top:6px; overflow-wrap:anywhere; } progress { width:100%; height:16px; accent-color:#087e74; } .controls { display:flex; gap:10px; flex-wrap:wrap; } .muted { opacity: .72; }
 .panel { border: 1px solid var(--orca-border, #555); padding: 20px; border-radius: 10px; margin-top: 16px; }
 label { display: block; margin: 10px 0 5px; }
 input, select, button { font: inherit; border-radius: 6px; padding: 9px; }
@@ -46,14 +46,20 @@ button:disabled { opacity: .5; cursor: default; }
 small { opacity: .7; } #status { min-height: 1.4em; }
 </style></head><body>
 <h1>FlashForge Printers</h1>
-<p class="muted">v0.6.0 · Read-only live status preview · No control commands</p>
+<p class="muted">v0.7.0 · Read-only live status preview · No control commands</p>
 <section class="panel"><h2>Saved printers</h2><div id="printers">No printers added yet.</div></section>
 <section class="panel" id="statuspanel"><h2>Live printer status</h2>
 <p class="muted">Enter the printer check code once per monitoring session. Status updates automatically every 5 seconds. Nothing is saved to disk.</p>
 <label for="activeprinter">Saved printer</label><select id="activeprinter"><option value="">Choose a printer</option></select>
 <label for="checkcode">Printer check code</label><input id="checkcode" type="password" autocomplete="off" placeholder="Code shown on printer">
 <p class="controls"><button id="connect" class="primary">Start monitoring</button><button id="stop" disabled>Stop monitoring</button><button id="refresh" disabled>Refresh now</button></p><p id="livestatus" role="status" aria-live="polite"></p><p id="lastupdate" class="muted"></p>
-<div id="statusdetails"></div></section>
+<div id="statusdetails"></div>
+<div class="panel" id="camerapanel"><h2>Camera preview</h2>
+<p class="muted">Opt-in preview from the selected printer on your LAN. The camera must be installed and enabled. The stream is never uploaded to a cloud service.</p>
+<p class="controls"><button id="startcamera" disabled>Show camera</button><button id="stopcamera" disabled>Hide camera</button></p>
+<p id="camerastatus" role="status" aria-live="polite">Start monitoring to enable camera preview.</p>
+<img id="camera" class="camera" alt="Live printer camera" hidden>
+</div></section>
 <section class="panel"><h2>Find printers on your network</h2>
 <p class="muted">Search only when you click the button. If broadcast fails, a limited scan of your Mac's local subnet runs automatically.</p>
 <button id="scan">Discover printers</button><p id="scanstatus" role="status" aria-live="polite"></p>
@@ -71,6 +77,7 @@ small { opacity: .7; } #status { min-height: 1.4em; }
 <script>
 const $ = id => document.getElementById(id);
 let monitoring = false, pending = false, refreshTimer = null, activeSession = 0;
+let cameraActive = false, cameraAddress = '';
 function send(message) {
   if (!window.orca || !window.orca.postMessage) { $('status').textContent = 'Orca plugin bridge unavailable.'; return; }
   window.orca.postMessage(message);
@@ -123,7 +130,23 @@ function showDiscovered(printers, error, diagnostics) {
     row.append(info, pick); root.append(row);
   });
 }
+function stopCamera() {
+  cameraActive = false; $('camera').removeAttribute('src'); $('camera').hidden = true;
+  $('stopcamera').disabled = true; $('startcamera').disabled = !monitoring;
+  $('camerastatus').textContent = 'Camera preview stopped.';
+}
+$('startcamera').addEventListener('click', () => {
+  if (!monitoring || !cameraAddress) { $('camerastatus').textContent = 'Start monitoring a saved printer first.'; return; }
+  const img = $('camera'); img.hidden = false;
+  img.src = 'http://' + cameraAddress + ':8080/?action=stream';
+  cameraActive = true; $('startcamera').disabled = true; $('stopcamera').disabled = false;
+  $('camerastatus').textContent = 'Opening camera stream…';
+});
+$('stopcamera').addEventListener('click', stopCamera);
+$('camera').addEventListener('load', () => { if (cameraActive) $('camerastatus').textContent = 'Camera stream loaded.'; });
+$('camera').addEventListener('error', () => { if (cameraActive) $('camerastatus').textContent = 'Camera stream unavailable in this view. Confirm camera is enabled and port 8080 works in a browser.'; });
 function stopMonitoring(notify = true) {
+  stopCamera(); cameraAddress = '';
   if (refreshTimer !== null) { clearInterval(refreshTimer); refreshTimer = null; }
   monitoring = false; pending = false; activeSession++;
   $('connect').disabled = false; $('stop').disabled = true; $('refresh').disabled = true;
@@ -139,6 +162,8 @@ $('connect').addEventListener('click', () => {
   if (!id || !code) { $('livestatus').textContent = 'Choose a saved printer and enter its check code.'; return; }
   stopMonitoring(false);
   monitoring = true; pending = true;
+  cameraAddress = ''; $('startcamera').disabled = true;
+  $('camerastatus').textContent = 'Waiting for printer connection…';
   $('connect').disabled = true; $('stop').disabled = false; $('refresh').disabled = false;
   $('livestatus').textContent = 'Connecting…'; $('lastupdate').textContent = '';
   $('statusdetails').replaceChildren();
@@ -155,6 +180,10 @@ function showStatus(msg) {
   $('livestatus').textContent = msg.message || '';
   const root = $('statusdetails');
   if (!msg.status) return;
+  if (msg.camera_address && !cameraAddress) {
+    cameraAddress = msg.camera_address; $('startcamera').disabled = false;
+    $('camerastatus').textContent = 'Camera ready to open. Click Show camera.';
+  }
   $('lastupdate').textContent = 'Last updated: ' + new Date().toLocaleTimeString();
   root.replaceChildren();
   const dash = document.createElement('div'); dash.className = 'dash';
@@ -559,6 +588,8 @@ class PrinterManager(orca.script.ScriptPluginCapabilityBase):
             self.reading_status = False
         try:
             if self.monitoring is not None and self.monitor_generation == generation and self.win is not None and self.win.is_open():
+                if response.get("status"):
+                    response["camera_address"] = address
                 response["session"] = session
                 self.win.post(response)
         except Exception:

@@ -1,19 +1,24 @@
 # /// script
 # requires-python = ">=3.12"
+# dependencies = ["flashforge-python-api>=1.6,<2"]
 #
 # [tool.orcaslicer.plugin]
 # name = "Orca FlashForge Plugin"
 # description = "Prototype printer manager for FlashForge Adventurer 5M."
 # author = "Community contributors"
-# version = "0.2.0"
+# version = "0.3.0"
 # ///
-"""Experimental printer manager. No network calls, filesystem writes, or commands.
+"""Opt-in LAN UDP discovery. No printer commands or persistent secrets.
 
 Printer entries exist only in memory and disappear when OrcaSlicer restarts.
 """
 
 import ipaddress
 import uuid
+import asyncio
+import threading
+
+from flashforge.discovery import PrinterDiscovery, DiscoveryOptions, PrinterModel
 
 import orca
 
@@ -35,9 +40,13 @@ button:disabled { opacity: .5; cursor: default; }
 small { opacity: .7; } #status { min-height: 1.4em; }
 </style></head><body>
 <h1>FlashForge Printers</h1>
-<p class="muted">v0.2.0 · Local setup prototype · No connection is made yet</p>
+<p class="muted">v0.3.0 · LAN discovery prototype · No printer commands</p>
 <section class="panel"><h2>Configured printers (temporary)</h2><div id="printers">No printers added yet.</div></section>
-<section class="panel"><h2>Add printer</h2>
+<section class="panel"><h2>Find printers on your network</h2>
+<p class="muted">Search only when you click the button. Your printer and Mac must be on the same LAN.</p>
+<button id="scan">Discover printers</button><p id="scanstatus" role="status" aria-live="polite"></p>
+<div id="discovered"></div></section>
+<section class="panel"><h2>Add printer manually</h2>
 <label for="model">Printer model</label><select id="model"><option value="ad5m">FlashForge Adventurer 5M</option></select>
 <label for="name">Display name</label><input id="name" maxlength="60" value="My Adventurer 5M">
 <label for="address">Printer IPv4 address</label><input id="address" placeholder="192.168.x.x" inputmode="decimal">
@@ -55,6 +64,32 @@ $('add').addEventListener('click', () => {
   $('status').textContent = 'Validating…';
   send({command:'add', model:$('model').value, name:$('name').value, address:$('address').value});
 });
+$('scan').addEventListener('click', () => {
+  $('scan').disabled = true;
+  $('scanstatus').textContent = 'Searching local network…';
+  $('discovered').replaceChildren();
+  send({command:'discover'});
+});
+function showDiscovered(printers, error) {
+  $('scan').disabled = false;
+  const root = $('discovered'); root.replaceChildren();
+  $('scanstatus').textContent = error || (printers.length ? 'Select a printer to fill the form below.' : 'No supported Adventurer 5M found. You can add it manually.');
+  printers.forEach(p => {
+    const row = document.createElement('div'); row.className = 'entry';
+    const info = document.createElement('div');
+    const title = document.createElement('strong'); title.textContent = p.name || 'Adventurer 5M';
+    const meta = document.createElement('div'); meta.className = 'muted'; meta.textContent = 'Adventurer 5M · ' + p.address;
+    info.append(title, meta);
+    const pick = document.createElement('button'); pick.textContent = 'Select';
+    pick.addEventListener('click', () => {
+      $('model').value = 'ad5m';
+      $('name').value = p.name || 'Adventurer 5M';
+      $('address').value = p.address;
+      $('status').textContent = 'Selected. Click Add printer to add to temporary list.';
+    });
+    row.append(info, pick); root.append(row);
+  });
+}
 function render(printers) {
   const root = $('printers'); root.replaceChildren();
   if (!printers.length) { root.textContent = 'No printers added yet.'; return; }
@@ -74,6 +109,7 @@ if (window.orca && window.orca.onMessage) {
   window.orca.onMessage(msg => {
     if (msg.command === 'printers') { render(msg.printers || []); $('status').textContent = msg.message || ''; }
     if (msg.command === 'error') $('status').textContent = msg.message || 'Invalid input';
+    if (msg.command === 'discovered') showDiscovered(msg.printers || [], msg.error || '');
   });
 }
 send({command:'list'});
@@ -96,6 +132,7 @@ class PrinterManager(orca.script.ScriptPluginCapabilityBase):
         super().__init__()
         self.printers = []
         self.win = None
+        self.scanning = False
 
     def get_name(self):
         return "Manage FlashForge Printers"
@@ -116,11 +153,42 @@ class PrinterManager(orca.script.ScriptPluginCapabilityBase):
         if self.win is not None:
             self.win.post({"command": "printers", "printers": self.printers, "message": message})
 
+    def discover_worker(self):
+        try:
+            options = DiscoveryOptions(timeout=5000, idle_timeout=2000, max_retries=1)
+            results = asyncio.run(PrinterDiscovery().discover(options))
+            matches = []
+            seen = set()
+            for printer in results:
+                if printer.model != PrinterModel.ADVENTURER_5M:
+                    continue
+                try:
+                    address = validate_ipv4(printer.ip_address)
+                except ValueError:
+                    continue
+                if address in seen:
+                    continue
+                seen.add(address)
+                matches.append({"name": str(printer.name or "Adventurer 5M")[:60], "address": address})
+            if self.win is not None and self.win.is_open():
+                self.win.post({"command": "discovered", "printers": matches})
+        except Exception as exc:
+            # Avoid printing network identifiers or exception details in the UI.
+            if self.win is not None and self.win.is_open():
+                self.win.post({"command": "discovered", "printers": [],
+                               "error": "Discovery failed. Check local-network permissions or use manual IP entry."})
+        finally:
+            self.scanning = False
+
     def on_message(self, msg):
         msg = msg or {}
         command = msg.get("command")
         if command == "list":
             self.post_list()
+        elif command == "discover":
+            if not self.scanning:
+                self.scanning = True
+                threading.Thread(target=self.discover_worker, daemon=True).start()
         elif command == "add":
             try:
                 if msg.get("model") != "ad5m":

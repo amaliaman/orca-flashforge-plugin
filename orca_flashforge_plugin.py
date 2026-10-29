@@ -6,7 +6,7 @@
 # name = "Orca FlashForge Plugin"
 # description = "Prototype printer manager for FlashForge Adventurer 5M."
 # author = "Community contributors"
-# version = "0.4.0"
+# version = "0.5.0"
 # ///
 """Opt-in LAN discovery and locally saved printer profiles. No printer commands or pairing secrets."""
 
@@ -24,6 +24,7 @@ from pathlib import Path
 
 from flashforge.discovery import PrinterDiscovery, DiscoveryOptions, PrinterModel
 import ifaddr
+from flashforge.client import FlashForgeClient
 
 import orca
 
@@ -45,8 +46,14 @@ button:disabled { opacity: .5; cursor: default; }
 small { opacity: .7; } #status { min-height: 1.4em; }
 </style></head><body>
 <h1>FlashForge Printers</h1>
-<p class="muted">v0.4.0 · LAN discovery prototype · No printer commands</p>
+<p class="muted">v0.5.0 · Read-only live status preview · No control commands</p>
 <section class="panel"><h2>Saved printers</h2><div id="printers">No printers added yet.</div></section>
+<section class="panel" id="statuspanel"><h2>Live printer status</h2>
+<p class="muted">Select a saved printer and enter its check code for a one-time, read-only status request. The code is not saved.</p>
+<label for="activeprinter">Saved printer</label><select id="activeprinter"><option value="">Choose a printer</option></select>
+<label for="checkcode">Printer check code</label><input id="checkcode" type="password" autocomplete="off" placeholder="Code shown on printer">
+<p><button id="connect">Read status</button></p><p id="livestatus" role="status" aria-live="polite"></p>
+<div id="statusdetails"></div></section>
 <section class="panel"><h2>Find printers on your network</h2>
 <p class="muted">Search only when you click the button. If broadcast fails, a limited scan of your Mac's local subnet runs automatically.</p>
 <button id="scan">Discover printers</button><p id="scanstatus" role="status" aria-live="polite"></p>
@@ -59,7 +66,7 @@ small { opacity: .7; } #status { min-height: 1.4em; }
 <label for="address">Printer IPv4 address</label><input id="address" placeholder="192.168.x.x" inputmode="decimal">
 <p><button class="primary" id="add">Save printer</button></p>
 <p id="status" role="status" aria-live="polite"></p>
-<p class="muted"><small>Printer names and addresses are stored locally on this Mac. No pairing codes are requested or saved. The printer is not contacted when saving.</small></p>
+<p class="muted"><small>Printer names and addresses are stored locally on this Mac. Check codes are used only for a read-only status request and are not saved. Saving a printer does not contact it.</small></p>
 </section>
 <script>
 const $ = id => document.getElementById(id);
@@ -115,7 +122,46 @@ function showDiscovered(printers, error, diagnostics) {
     row.append(info, pick); root.append(row);
   });
 }
+$('connect').addEventListener('click', () => {
+  const id = $('activeprinter').value;
+  const code = $('checkcode').value.trim();
+  if (!id || !code) { $('livestatus').textContent = 'Choose a saved printer and enter its check code.'; return; }
+  $('connect').disabled = true;
+  $('livestatus').textContent = 'Reading printer status…';
+  $('statusdetails').replaceChildren();
+  send({command:'read_status', id, check_code:code});
+  $('checkcode').value = '';
+});
+function showStatus(msg) {
+  $('connect').disabled = false;
+  $('livestatus').textContent = msg.message || '';
+  const root = $('statusdetails'); root.replaceChildren();
+  if (!msg.status) return;
+  const fields = [
+    ['State', msg.status.state], ['Nozzle', msg.status.nozzle],
+    ['Bed', msg.status.bed], ['Progress', msg.status.progress],
+    ['File', msg.status.file], ['Firmware', msg.status.firmware]
+  ];
+  fields.forEach(([label, value]) => {
+    if (value === null || value === undefined || value === '') return;
+    const row = document.createElement('div'); row.className = 'entry';
+    const left = document.createElement('strong'); left.textContent = label;
+    const right = document.createElement('span'); right.textContent = String(value);
+    row.append(left, right); root.append(row);
+  });
+}
 function render(printers) {
+  const active = $('activeprinter');
+  const selected = active.value;
+  active.replaceChildren();
+  const placeholder = document.createElement('option'); placeholder.value = ''; placeholder.textContent = 'Choose a printer';
+  active.append(placeholder);
+  printers.forEach(p => {
+    const option = document.createElement('option'); option.value = p.id; option.textContent = p.name;
+    active.append(option);
+  });
+  if (printers.some(p => p.id === selected)) active.value = selected;
+  else if (printers.length === 1) active.value = printers[0].id;
   const root = $('printers'); root.replaceChildren();
   if (!printers.length) { root.textContent = 'No printers added yet.'; return; }
   printers.forEach(p => {
@@ -135,6 +181,7 @@ if (window.orca && window.orca.onMessage) {
     if (msg.command === 'printers') { render(msg.printers || []); $('status').textContent = msg.message || ''; }
     if (msg.command === 'error') $('status').textContent = msg.message || 'Invalid input';
     if (msg.command === 'discovered') showDiscovered(msg.printers || [], msg.error || '', msg.diagnostics || '');
+    if (msg.command === 'status_result') showStatus(msg);
     if (msg.command === 'probe_result') { $('probe').disabled = false; $('probestatus').textContent = msg.message || 'Test completed.'; }
     if (msg.command === 'udpdiag_result') { $('udpdiag').disabled = false; $('udpstatus').textContent = msg.message || 'UDP test completed.'; }
   });
@@ -330,6 +377,8 @@ class PrinterManager(orca.script.ScriptPluginCapabilityBase):
                 if address in seen:
                     continue
                 seen.add(address)
+                if printer.serial_number:
+                    self.discovered_serials[address] = str(printer.serial_number)
                 matches.append({"name": str(printer.name or "Adventurer 5M")[:60], "address": address})
             diagnostics = (
                 "Broadcast: " + str(broadcast_count) + " parsed. Fallback: " +
@@ -418,6 +467,72 @@ class PrinterManager(orca.script.ScriptPluginCapabilityBase):
         except Exception:
             pass
 
+    @staticmethod
+    def lookup_serial(address):
+        """Read serial from a targeted UDP discovery reply, never from a file."""
+        parser = PrinterDiscovery()
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.bind(("0.0.0.0", 0))
+            sock.settimeout(0.3)
+            for port in (48899, 19000):
+                sock.sendto(b"", (address, port))
+            deadline = time.monotonic() + 3.0
+            while time.monotonic() < deadline:
+                try:
+                    payload, peer = sock.recvfrom(4096)
+                except socket.timeout:
+                    continue
+                if peer[0] != address:
+                    continue
+                printer = parser.parse_discovery_response(payload, address)
+                if printer and printer.model == PrinterModel.ADVENTURER_5M and printer.serial_number:
+                    return str(printer.serial_number)
+        return None
+
+    def status_worker(self, printer, check_code):
+        try:
+            address = validate_ipv4(printer["address"])
+            serial = self.discovered_serials.get(address) or self.lookup_serial(address)
+            if not serial:
+                raise ValueError("Could not identify printer serial via LAN discovery. Try Discover printers first.")
+            async def read():
+                client = FlashForgeClient(address, serial, check_code)
+                try:
+                    info = await asyncio.wait_for(client.info.get(), timeout=12)
+                    if info is None:
+                        return None
+                    def temp(value):
+                        if value is None:
+                            return None
+                        return str(round(float(value.current), 1)) + "°C / " + str(round(float(value.set), 1)) + "°C target"
+                    return {
+                        "state": str(info.status or ""),
+                        "nozzle": temp(info.extruder),
+                        "bed": temp(info.print_bed),
+                        "progress": str(info.print_progress_int) + "%",
+                        "file": str(info.print_file_name or ""),
+                        "firmware": str(info.firmware_version or ""),
+                    }
+                finally:
+                    await client.dispose()
+            result = asyncio.run(read())
+            if result is None:
+                response = {"command": "status_result", "message": "Printer did not return readable status. Check its check code."}
+            else:
+                response = {"command": "status_result", "message": "Read-only status received.", "status": result}
+        except ValueError as exc:
+            response = {"command": "status_result", "message": str(exc)}
+        except Exception as exc:
+            response = {"command": "status_result", "message": "Status request failed (" + type(exc).__name__ + "). Check the code and network."}
+        finally:
+            check_code = None
+            self.reading_status = False
+        try:
+            if self.win is not None and self.win.is_open():
+                self.win.post(response)
+        except Exception:
+            pass
+
     def on_message(self, msg):
         msg = msg or {}
         command = msg.get("command")
@@ -427,6 +542,17 @@ class PrinterManager(orca.script.ScriptPluginCapabilityBase):
             if not self.scanning:
                 self.scanning = True
                 threading.Thread(target=self.discover_worker, daemon=True).start()
+        elif command == "read_status":
+            if self.reading_status:
+                return
+            ident = msg.get("id")
+            printer = next((p for p in self.printers if p["id"] == ident), None)
+            check_code = msg.get("check_code")
+            if printer is None or not isinstance(check_code, str) or not 1 <= len(check_code) <= 64:
+                self.win.post({"command": "status_result", "message": "Choose a saved printer and enter a valid check code."})
+                return
+            self.reading_status = True
+            threading.Thread(target=self.status_worker, args=(printer.copy(), check_code), daemon=True).start()
         elif command == "probe":
             if not self.probing:
                 self.probing = True

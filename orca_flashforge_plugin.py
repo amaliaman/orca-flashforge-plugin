@@ -6,7 +6,7 @@
 # name = "Orca FlashForge Plugin"
 # description = "Prototype printer manager for FlashForge Adventurer 5M."
 # author = "Community contributors"
-# version = "0.3.2"
+# version = "0.3.3"
 # ///
 """Opt-in LAN UDP discovery. No printer commands or persistent secrets.
 
@@ -17,6 +17,7 @@ import ipaddress
 import uuid
 import asyncio
 import threading
+import socket
 
 from flashforge.discovery import PrinterDiscovery, DiscoveryOptions, PrinterModel
 
@@ -40,12 +41,13 @@ button:disabled { opacity: .5; cursor: default; }
 small { opacity: .7; } #status { min-height: 1.4em; }
 </style></head><body>
 <h1>FlashForge Printers</h1>
-<p class="muted">v0.3.2 · LAN discovery prototype · No printer commands</p>
+<p class="muted">v0.3.3 · LAN discovery prototype · No printer commands</p>
 <section class="panel"><h2>Configured printers (temporary)</h2><div id="printers">No printers added yet.</div></section>
 <section class="panel"><h2>Find printers on your network</h2>
 <p class="muted">Search only when you click the button. Your printer and Mac must be on the same LAN.</p>
 <button id="scan">Discover printers</button><p id="scanstatus" role="status" aria-live="polite"></p>
 <div id="discovered"></div></section>
+<section class="panel"><h2>Network diagnostics</h2><p class="muted">Checks whether the printer accepts TCP connections on its local control ports. No commands are sent.</p><label for="probeip">Printer IP address</label><input id="probeip" placeholder="192.168.x.x" inputmode="decimal"><p><button id="probe">Test connectivity</button></p><p id="probestatus" role="status" aria-live="polite"></p></section>
 <section class="panel"><h2>Add printer manually</h2>
 <label for="model">Printer model</label><select id="model"><option value="ad5m">FlashForge Adventurer 5M</option></select>
 <label for="name">Display name</label><input id="name" maxlength="60" value="My Adventurer 5M">
@@ -69,6 +71,11 @@ $('scan').addEventListener('click', () => {
   $('scanstatus').textContent = 'Searching local network…';
   $('discovered').replaceChildren();
   send({command:'discover'});
+});
+$('probe').addEventListener('click', () => {
+  $('probe').disabled = true;
+  $('probestatus').textContent = 'Testing…';
+  send({command:'probe', address:$('probeip').value});
 });
 function showDiscovered(printers, error, diagnostics) {
   $('scan').disabled = false;
@@ -115,6 +122,7 @@ if (window.orca && window.orca.onMessage) {
     if (msg.command === 'printers') { render(msg.printers || []); $('status').textContent = msg.message || ''; }
     if (msg.command === 'error') $('status').textContent = msg.message || 'Invalid input';
     if (msg.command === 'discovered') showDiscovered(msg.printers || [], msg.error || '', msg.diagnostics || '');
+    if (msg.command === 'probe_result') { $('probe').disabled = false; $('probestatus').textContent = msg.message || 'Test completed.'; }
   });
 }
 send({command:'list'});
@@ -138,6 +146,7 @@ class PrinterManager(orca.script.ScriptPluginCapabilityBase):
         self.printers = []
         self.win = None
         self.scanning = False
+        self.probing = False
 
     def get_name(self):
         return "Manage FlashForge Printers"
@@ -189,6 +198,29 @@ class PrinterManager(orca.script.ScriptPluginCapabilityBase):
         finally:
             self.scanning = False
 
+    def probe_worker(self, address):
+        try:
+            address = validate_ipv4(address)
+            results = []
+            for port in (8898, 8899):
+                try:
+                    with socket.create_connection((address, port), timeout=2.0):
+                        results.append("TCP " + str(port) + ": reachable")
+                except (OSError, TimeoutError):
+                    results.append("TCP " + str(port) + ": no connection")
+            message = " | ".join(results) + ". This tests connectivity only, not pairing."
+        except ValueError as exc:
+            message = str(exc)
+        except Exception:
+            message = "Connectivity test failed unexpectedly."
+        finally:
+            self.probing = False
+        try:
+            if self.win is not None and self.win.is_open():
+                self.win.post({"command": "probe_result", "message": message})
+        except Exception:
+            pass
+
     def on_message(self, msg):
         msg = msg or {}
         command = msg.get("command")
@@ -198,6 +230,10 @@ class PrinterManager(orca.script.ScriptPluginCapabilityBase):
             if not self.scanning:
                 self.scanning = True
                 threading.Thread(target=self.discover_worker, daemon=True).start()
+        elif command == "probe":
+            if not self.probing:
+                self.probing = True
+                threading.Thread(target=self.probe_worker, args=(msg.get("address", ""),), daemon=True).start()
         elif command == "add":
             try:
                 if msg.get("model") != "ad5m":

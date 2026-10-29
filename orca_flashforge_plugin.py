@@ -6,7 +6,7 @@
 # name = "Orca FlashForge Plugin"
 # description = "Prototype printer manager for FlashForge Adventurer 5M."
 # author = "Community contributors"
-# version = "0.3.4"
+# version = "0.3.5"
 # ///
 """Opt-in LAN UDP discovery. No printer commands or persistent secrets.
 
@@ -21,6 +21,7 @@ import socket
 import time
 
 from flashforge.discovery import PrinterDiscovery, DiscoveryOptions, PrinterModel
+import ifaddr
 
 import orca
 
@@ -42,10 +43,10 @@ button:disabled { opacity: .5; cursor: default; }
 small { opacity: .7; } #status { min-height: 1.4em; }
 </style></head><body>
 <h1>FlashForge Printers</h1>
-<p class="muted">v0.3.4 · LAN discovery prototype · No printer commands</p>
+<p class="muted">v0.3.5 · LAN discovery prototype · No printer commands</p>
 <section class="panel"><h2>Configured printers (temporary)</h2><div id="printers">No printers added yet.</div></section>
 <section class="panel"><h2>Find printers on your network</h2>
-<p class="muted">Search only when you click the button. Your printer and Mac must be on the same LAN.</p>
+<p class="muted">Search only when you click the button. If broadcast fails, a limited scan of your Mac's local subnet runs automatically.</p>
 <button id="scan">Discover printers</button><p id="scanstatus" role="status" aria-live="polite"></p>
 <div id="discovered"></div></section>
 <section class="panel"><h2>Network diagnostics</h2><p class="muted">Checks whether the printer accepts TCP connections on its local control ports. No commands are sent.</p><label for="probeip">Printer IP address</label><input id="probeip" placeholder="192.168.x.x" inputmode="decimal"><p><button id="probe">Test connectivity</button></p><p id="probestatus" role="status" aria-live="polite"></p></section>
@@ -176,17 +177,82 @@ class PrinterManager(orca.script.ScriptPluginCapabilityBase):
         if self.win is not None:
             self.win.post({"command": "printers", "printers": self.printers, "message": message})
 
+    @staticmethod
+    def local_scan_targets():
+        """Only probe private, directly attached IPv4 networks, capped at /24."""
+        targets = set()
+        for adapter in ifaddr.get_adapters():
+            for entry in adapter.ips:
+                if not entry.is_IPv4 or not isinstance(entry.ip, str):
+                    continue
+                try:
+                    ip = ipaddress.IPv4Address(entry.ip)
+                    prefix = entry.network_prefix
+                    if not ip.is_private or ip.is_loopback or ip.is_link_local:
+                        continue
+                    if not isinstance(prefix, int) or not 1 <= prefix <= 30:
+                        continue
+                    attached = ipaddress.IPv4Network((ip, prefix), strict=False)
+                    subnet = attached if attached.prefixlen >= 24 else ipaddress.IPv4Network((ip, 24), strict=False)
+                    targets.update(str(host) for host in subnet.hosts() if host != ip)
+                except (ValueError, TypeError):
+                    continue
+        return sorted(targets, key=lambda x: int(ipaddress.IPv4Address(x)))[:512]
+
+    @staticmethod
+    def targeted_subnet_discovery(targets):
+        """Read-only UDP discovery, bounded to local subnet addresses."""
+        if not targets:
+            return [], 0
+        parser = PrinterDiscovery()
+        found = {}
+        raw_responses = 0
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.bind(("0.0.0.0", 0))
+            sock.settimeout(0.2)
+            for address in targets:
+                for port in (48899, 19000):
+                    try:
+                        sock.sendto(b"", (address, port))
+                    except OSError:
+                        pass
+            deadline = time.monotonic() + 5.0
+            allowed = set(targets)
+            while time.monotonic() < deadline:
+                try:
+                    payload, peer = sock.recvfrom(4096)
+                except socket.timeout:
+                    continue
+                except OSError:
+                    break
+                if peer[0] not in allowed:
+                    continue
+                raw_responses += 1
+                try:
+                    printer = parser.parse_discovery_response(payload, peer[0])
+                    if printer is not None:
+                        found[peer[0]] = printer
+                except Exception:
+                    continue
+        return list(found.values()), raw_responses
+
     def discover_worker(self):
         try:
-            options = DiscoveryOptions(timeout=8000, idle_timeout=8000, max_retries=1)
+            options = DiscoveryOptions(timeout=6000, idle_timeout=6000, max_retries=1)
             results = asyncio.run(PrinterDiscovery().discover(options))
+            broadcast_count = len(results)
+            targets = []
+            raw_responses = 0
+            if not any(p.model == PrinterModel.ADVENTURER_5M for p in results):
+                targets = self.local_scan_targets()
+                additional, raw_responses = self.targeted_subnet_discovery(targets)
+                results.extend(additional)
             matches = []
             seen = set()
             model_counts = {}
             for printer in results:
                 model = str(printer.model.value)
                 model_counts[model] = model_counts.get(model, 0) + 1
-            for printer in results:
                 if printer.model != PrinterModel.ADVENTURER_5M:
                     continue
                 try:
@@ -197,13 +263,20 @@ class PrinterManager(orca.script.ScriptPluginCapabilityBase):
                     continue
                 seen.add(address)
                 matches.append({"name": str(printer.name or "Adventurer 5M")[:60], "address": address})
+            diagnostics = (
+                "Broadcast: " + str(broadcast_count) + " parsed. Fallback: " +
+                str(len(targets)) + " local addresses probed, " +
+                str(raw_responses) + " UDP replies. Models: " +
+                (", ".join(str(k) + " (" + str(v) + ")" for k, v in sorted(model_counts.items()))
+                 if model_counts else "none") + "."
+            )
             if self.win is not None and self.win.is_open():
-                self.win.post({"command": "discovered", "printers": matches, "diagnostics": ("UDP discovery responses: " + str(len(results)) + ". Models: " + (", ".join(str(k) + " (" + str(v) + ")" for k, v in sorted(model_counts.items())) if model_counts else "none") + ".")})
+                self.win.post({"command": "discovered", "printers": matches, "diagnostics": diagnostics})
         except Exception as exc:
-            # Avoid printing network identifiers or exception details in the UI.
             if self.win is not None and self.win.is_open():
                 self.win.post({"command": "discovered", "printers": [],
-                               "error": "Discovery failed. Check local-network permissions or use manual IP entry.", "diagnostics": "Error type: " + type(exc).__name__})
+                               "error": "Discovery failed. You can still add a printer manually.",
+                               "diagnostics": "Error type: " + type(exc).__name__})
         finally:
             self.scanning = False
 

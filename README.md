@@ -47,3 +47,10 @@ Do not commit pairing codes, printer identifiers, local configuration files, log
 ## License
 
 MIT. See [LICENSE](LICENSE).
+
+
+## v0.4.0 — Saved printer profiles (experimental)
+
+The plugin now saves non-secret printer profiles (name, model, IPv4 address and local ID) to a user-owned JSON file. On macOS the location is `~/Library/Application Support/orca-flashforge-plugin/printers.json`; on Windows it uses `%APPDATA%/orca-flashforge-plugin/printers.json`, and on Linux `$XDG_CONFIG_HOME/orca-flashforge-plugin/printers.json` (or `~/.config`). The file is written atomically and, on POSIX systems, with owner-only permissions. No pairing codes, tokens, serial numbers, or printer commands are involved.
+
+After installation, discover a printer, click Select, then Save printer. Close and reopen the plugin or restart OrcaSlicer and check whether the saved printer remains listed. This functionality has not yet been tested on every OrcaSlicer sandbox/runtime and may fail if the plugin runtime prohibits filesystem writes. The plugin will show an error instead of claiming the save succeeded. If a settings file is malformed, it is preserved rather than overwritten.

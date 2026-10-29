@@ -6,7 +6,7 @@
 # name = "Orca FlashForge Plugin"
 # description = "Prototype printer manager for FlashForge Adventurer 5M."
 # author = "Community contributors"
-# version = "0.5.1"
+# version = "0.6.0"
 # ///
 """Opt-in LAN discovery and locally saved printer profiles. No printer commands or pairing secrets."""
 
@@ -34,7 +34,7 @@ PAGE = """<!doctype html>
 <style>
 body { font: 14px system-ui, sans-serif; margin: 24px; color: var(--orca-text, #e5e7eb); background: var(--orca-bg, #24272c); }
 h1 { font-size: 22px; margin: 0 0 6px; } h2 { font-size: 17px; margin: 0 0 12px; }
-p { line-height: 1.5; } .muted { opacity: .72; }
+p { line-height: 1.5; } .dash { display:grid; grid-template-columns:repeat(auto-fit,minmax(170px,1fr)); gap:12px; margin-top:16px; } .tile { border:1px solid #6666; border-radius:8px; padding:14px; } .tile .value { font-size:20px; font-weight:650; margin-top:6px; overflow-wrap:anywhere; } progress { width:100%; height:16px; accent-color:#087e74; } .controls { display:flex; gap:10px; flex-wrap:wrap; } .muted { opacity: .72; }
 .panel { border: 1px solid var(--orca-border, #555); padding: 20px; border-radius: 10px; margin-top: 16px; }
 label { display: block; margin: 10px 0 5px; }
 input, select, button { font: inherit; border-radius: 6px; padding: 9px; }
@@ -46,13 +46,13 @@ button:disabled { opacity: .5; cursor: default; }
 small { opacity: .7; } #status { min-height: 1.4em; }
 </style></head><body>
 <h1>FlashForge Printers</h1>
-<p class="muted">v0.5.1 · Read-only live status preview · No control commands</p>
+<p class="muted">v0.6.0 · Read-only live status preview · No control commands</p>
 <section class="panel"><h2>Saved printers</h2><div id="printers">No printers added yet.</div></section>
 <section class="panel" id="statuspanel"><h2>Live printer status</h2>
-<p class="muted">Select a saved printer and enter its check code for a one-time, read-only status request. The code is not saved.</p>
+<p class="muted">Enter the printer check code once per monitoring session. Status updates automatically every 5 seconds. Nothing is saved to disk.</p>
 <label for="activeprinter">Saved printer</label><select id="activeprinter"><option value="">Choose a printer</option></select>
 <label for="checkcode">Printer check code</label><input id="checkcode" type="password" autocomplete="off" placeholder="Code shown on printer">
-<p><button id="connect">Read status</button></p><p id="livestatus" role="status" aria-live="polite"></p>
+<p class="controls"><button id="connect" class="primary">Start monitoring</button><button id="stop" disabled>Stop monitoring</button><button id="refresh" disabled>Refresh now</button></p><p id="livestatus" role="status" aria-live="polite"></p><p id="lastupdate" class="muted"></p>
 <div id="statusdetails"></div></section>
 <section class="panel"><h2>Find printers on your network</h2>
 <p class="muted">Search only when you click the button. If broadcast fails, a limited scan of your Mac's local subnet runs automatically.</p>
@@ -70,6 +70,7 @@ small { opacity: .7; } #status { min-height: 1.4em; }
 </section>
 <script>
 const $ = id => document.getElementById(id);
+let monitoring = false, pending = false, refreshTimer = null, activeSession = 0;
 function send(message) {
   if (!window.orca || !window.orca.postMessage) { $('status').textContent = 'Orca plugin bridge unavailable.'; return; }
   window.orca.postMessage(message);
@@ -122,33 +123,56 @@ function showDiscovered(printers, error, diagnostics) {
     row.append(info, pick); root.append(row);
   });
 }
+function stopMonitoring(notify = true) {
+  if (refreshTimer !== null) { clearInterval(refreshTimer); refreshTimer = null; }
+  monitoring = false; pending = false; activeSession++;
+  $('connect').disabled = false; $('stop').disabled = true; $('refresh').disabled = true;
+  if (notify) { send({command:'stop_monitoring'}); $('livestatus').textContent = 'Monitoring stopped.'; }
+}
+function requestStatus() {
+  if (!monitoring || pending) return;
+  pending = true;
+  send({command:'read_status', id:$('activeprinter').value, session:activeSession});
+}
 $('connect').addEventListener('click', () => {
-  const id = $('activeprinter').value;
-  const code = $('checkcode').value.trim();
+  const id = $('activeprinter').value, code = $('checkcode').value.trim();
   if (!id || !code) { $('livestatus').textContent = 'Choose a saved printer and enter its check code.'; return; }
-  $('connect').disabled = true;
-  $('livestatus').textContent = 'Reading printer status…';
+  stopMonitoring(false);
+  monitoring = true; pending = true;
+  $('connect').disabled = true; $('stop').disabled = false; $('refresh').disabled = false;
+  $('livestatus').textContent = 'Connecting…'; $('lastupdate').textContent = '';
   $('statusdetails').replaceChildren();
-  send({command:'read_status', id, check_code:code});
+  send({command:'start_monitoring', id, check_code:code, session:activeSession});
   $('checkcode').value = '';
+  refreshTimer = setInterval(requestStatus, 5000);
 });
+$('stop').addEventListener('click', () => stopMonitoring());
+$('refresh').addEventListener('click', requestStatus);
+$('activeprinter').addEventListener('change', () => { if (monitoring) stopMonitoring(); });
 function showStatus(msg) {
-  $('connect').disabled = false;
+  if (!monitoring || msg.session !== activeSession) return;
+  pending = false;
   $('livestatus').textContent = msg.message || '';
-  const root = $('statusdetails'); root.replaceChildren();
+  const root = $('statusdetails');
   if (!msg.status) return;
-  const fields = [
-    ['State', msg.status.state], ['Nozzle', msg.status.nozzle],
-    ['Bed', msg.status.bed], ['Progress', msg.status.progress],
-    ['File', msg.status.file], ['Firmware', msg.status.firmware]
-  ];
-  fields.forEach(([label, value]) => {
+  $('lastupdate').textContent = 'Last updated: ' + new Date().toLocaleTimeString();
+  root.replaceChildren();
+  const dash = document.createElement('div'); dash.className = 'dash';
+  const fields = [['State',msg.status.state], ['Nozzle',msg.status.nozzle],['Bed',msg.status.bed],
+                  ['Progress',msg.status.progress],['File',msg.status.file],['Firmware',msg.status.firmware]];
+  fields.forEach(([label,value]) => {
     if (value === null || value === undefined || value === '') return;
-    const row = document.createElement('div'); row.className = 'entry';
-    const left = document.createElement('strong'); left.textContent = label;
-    const right = document.createElement('span'); right.textContent = String(value);
-    row.append(left, right); root.append(row);
+    const tile = document.createElement('div'); tile.className = 'tile';
+    const heading = document.createElement('div'); heading.className = 'muted'; heading.textContent = label;
+    const val = document.createElement('div'); val.className = 'value'; val.textContent = String(value);
+    tile.append(heading,val); dash.append(tile);
   });
+  root.append(dash);
+  const number = Number.parseFloat(msg.status.progress);
+  if (Number.isFinite(number)) {
+    const bar = document.createElement('progress'); bar.max = 100; bar.value = Math.max(0,Math.min(100,number));
+    bar.setAttribute('aria-label','Print progress'); root.append(bar);
+  }
 }
 function render(printers) {
   const active = $('activeprinter');
@@ -178,7 +202,7 @@ function render(printers) {
 }
 if (window.orca && window.orca.onMessage) {
   window.orca.onMessage(msg => {
-    if (msg.command === 'printers') { render(msg.printers || []); $('status').textContent = msg.message || ''; }
+    if (msg.command === 'printers') { if (monitoring && !(msg.printers || []).some(p => p.id === $('activeprinter').value)) stopMonitoring(); render(msg.printers || []); $('status').textContent = msg.message || ''; }
     if (msg.command === 'error') $('status').textContent = msg.message || 'Invalid input';
     if (msg.command === 'discovered') showDiscovered(msg.printers || [], msg.error || '', msg.diagnostics || '');
     if (msg.command === 'status_result') showStatus(msg);
@@ -214,6 +238,8 @@ class PrinterManager(orca.script.ScriptPluginCapabilityBase):
         self.udp_testing = False
         self.reading_status = False
         self.discovered_serials = {}
+        self.monitoring = None
+        self.monitor_generation = 0
 
     @staticmethod
     def get_config_path():
@@ -277,6 +303,8 @@ class PrinterManager(orca.script.ScriptPluginCapabilityBase):
         return "Manage FlashForge Printers"
 
     def execute(self):
+        self.monitoring = None
+        self.monitor_generation += 1
         if self.win is not None and self.win.is_open():
             self.win.close()
         self.win = orca.host.ui.create_window(
@@ -491,7 +519,7 @@ class PrinterManager(orca.script.ScriptPluginCapabilityBase):
                     return str(printer.serial_number)
         return None
 
-    def status_worker(self, printer, check_code):
+    def status_worker(self, printer, check_code, session, generation):
         try:
             address = validate_ipv4(printer["address"])
             serial = self.discovered_serials.get(address) or self.lookup_serial(address)
@@ -530,7 +558,8 @@ class PrinterManager(orca.script.ScriptPluginCapabilityBase):
             check_code = None
             self.reading_status = False
         try:
-            if self.win is not None and self.win.is_open():
+            if self.monitoring is not None and self.monitor_generation == generation and self.win is not None and self.win.is_open():
+                response["session"] = session
                 self.win.post(response)
         except Exception:
             pass
@@ -544,17 +573,32 @@ class PrinterManager(orca.script.ScriptPluginCapabilityBase):
             if not self.scanning:
                 self.scanning = True
                 threading.Thread(target=self.discover_worker, daemon=True).start()
-        elif command == "read_status":
-            if self.reading_status:
-                return
+        elif command == "start_monitoring":
             ident = msg.get("id")
             printer = next((p for p in self.printers if p["id"] == ident), None)
-            check_code = msg.get("check_code")
-            if printer is None or not isinstance(check_code, str) or not 1 <= len(check_code) <= 64:
-                self.win.post({"command": "status_result", "message": "Choose a saved printer and enter a valid check code."})
+            code = msg.get("check_code")
+            session = msg.get("session")
+            if printer is None or not isinstance(code, str) or not 1 <= len(code) <= 64 or not isinstance(session, int):
+                self.win.post({"command": "status_result", "session": session, "message": "Invalid printer or check code."})
+                return
+            self.monitor_generation += 1
+            self.monitoring = {"id": ident, "code": code, "session": session}
+            if not self.reading_status:
+                self.reading_status = True
+                threading.Thread(target=self.status_worker, args=(printer.copy(), code, session, self.monitor_generation), daemon=True).start()
+        elif command == "stop_monitoring":
+            self.monitor_generation += 1
+            self.monitoring = None
+        elif command == "read_status":
+            session = msg.get("session")
+            monitor = self.monitoring
+            if self.reading_status or monitor is None or monitor["id"] != msg.get("id") or monitor["session"] != session:
+                return
+            printer = next((p for p in self.printers if p["id"] == monitor["id"]), None)
+            if printer is None:
                 return
             self.reading_status = True
-            threading.Thread(target=self.status_worker, args=(printer.copy(), check_code), daemon=True).start()
+            threading.Thread(target=self.status_worker, args=(printer.copy(), monitor["code"], session, self.monitor_generation), daemon=True).start()
         elif command == "probe":
             if not self.probing:
                 self.probing = True

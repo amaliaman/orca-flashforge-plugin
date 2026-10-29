@@ -6,7 +6,7 @@
 # name = "Orca FlashForge Plugin"
 # description = "Prototype printer manager for FlashForge Adventurer 5M."
 # author = "Community contributors"
-# version = "0.3.5"
+# version = "0.3.6"
 # ///
 """Opt-in LAN UDP discovery. No printer commands or persistent secrets.
 
@@ -43,7 +43,7 @@ button:disabled { opacity: .5; cursor: default; }
 small { opacity: .7; } #status { min-height: 1.4em; }
 </style></head><body>
 <h1>FlashForge Printers</h1>
-<p class="muted">v0.3.5 · LAN discovery prototype · No printer commands</p>
+<p class="muted">v0.3.6 · LAN discovery prototype · No printer commands</p>
 <section class="panel"><h2>Configured printers (temporary)</h2><div id="printers">No printers added yet.</div></section>
 <section class="panel"><h2>Find printers on your network</h2>
 <p class="muted">Search only when you click the button. If broadcast fails, a limited scan of your Mac's local subnet runs automatically.</p>
@@ -51,7 +51,7 @@ small { opacity: .7; } #status { min-height: 1.4em; }
 <div id="discovered"></div></section>
 <section class="panel"><h2>Network diagnostics</h2><p class="muted">Checks whether the printer accepts TCP connections on its local control ports. No commands are sent.</p><label for="probeip">Printer IP address</label><input id="probeip" placeholder="192.168.x.x" inputmode="decimal"><p><button id="probe">Test connectivity</button></p><p id="probestatus" role="status" aria-live="polite"></p></section>
 <p><button id="udpdiag">Diagnose UDP discovery</button></p><p id="udpstatus" role="status" aria-live="polite"></p></section>
-<section class="panel"><h2>Add printer manually</h2>
+<section class="panel" id="addpanel"><h2>Add printer manually</h2>
 <label for="model">Printer model</label><select id="model"><option value="ad5m">FlashForge Adventurer 5M</option></select>
 <label for="name">Display name</label><input id="name" maxlength="60" value="My Adventurer 5M">
 <label for="address">Printer IPv4 address</label><input id="address" placeholder="192.168.x.x" inputmode="decimal">
@@ -105,7 +105,10 @@ function showDiscovered(printers, error, diagnostics) {
       $('model').value = 'ad5m';
       $('name').value = p.name || 'Adventurer 5M';
       $('address').value = p.address;
-      $('status').textContent = 'Selected. Click Add printer to add to temporary list.';
+      $('scanstatus').textContent = 'Selected ' + (p.name || 'Adventurer 5M') + '. Review the details below.';
+      $('status').textContent = 'Printer selected. Click Add printer to add it to the temporary list.';
+      $('addpanel').scrollIntoView({behavior:'smooth', block:'start'});
+      $('address').focus();
     });
     row.append(info, pick); root.append(row);
   });
